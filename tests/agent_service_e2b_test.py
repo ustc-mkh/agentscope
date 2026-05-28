@@ -3,9 +3,11 @@
 """Integration tests for the agent service with an E2B workspace backend.
 
 Tests the full HTTP API surface — agent CRUD, session CRUD, workspace MCP
-and skill management — with a real E2B cloud sandbox backend.  Storage is
-backed by ``fakeredis`` so no external Redis is required; a valid
-``E2B_API_KEY`` environment variable **is** required for all tests.
+and skill management — with a real E2B cloud sandbox backend.  Storage uses
+a real Redis server (connection configurable via ``REDIS_HOST``,
+``REDIS_PORT``, ``REDIS_DB``, ``REDIS_PASSWORD`` env vars).  A valid
+``E2B_API_KEY`` environment variable **and** a Redis server are required
+for all tests.
 
 The whole module is skipped when ``E2B_API_KEY`` is not set.
 """
@@ -16,7 +18,6 @@ import unittest
 import uuid
 from unittest.async_case import IsolatedAsyncioTestCase
 
-import fakeredis.aioredis
 from fastapi.middleware import Middleware
 from fastapi.middleware.cors import CORSMiddleware
 from httpx import ASGITransport, AsyncClient
@@ -38,12 +39,20 @@ _USER_HEADERS = {"X-User-ID": "test-user"}
 
 
 def _make_storage() -> RedisStorage:
-    """Create a RedisStorage backed by fakeredis (in-memory)."""
-    storage = RedisStorage.__new__(RedisStorage)
-    storage._client = fakeredis.aioredis.FakeRedis(decode_responses=True)
-    storage.key_ttl = None
-    storage.key_config = RedisKeyConfig()
-    return storage
+    """Create a RedisStorage connected to a real Redis server.
+
+    Connection parameters are read from environment variables:
+    ``REDIS_HOST`` (default ``localhost``), ``REDIS_PORT`` (default ``6379``),
+    ``REDIS_PASSWORD`` (default ``None``), ``REDIS_DB`` (default ``0``).
+    """
+    return RedisStorage(
+        host=os.environ.get("REDIS_HOST", "localhost"),
+        port=int(os.environ.get("REDIS_PORT", "6379")),
+        db=int(os.environ.get("REDIS_DB", "0")),
+        password=os.environ.get("REDIS_PASSWORD", None) or None,
+        key_ttl=None,
+        key_config=RedisKeyConfig(),
+    )
 
 
 # ── test base class ────────────────────────────────────────────────
@@ -82,6 +91,9 @@ class E2BAgentServiceTestBase(IsolatedAsyncioTestCase):
         await self._exit_stack.__aenter__()
         await self._exit_stack.enter_async_context(self.storage)
         await self._exit_stack.enter_async_context(self.workspace_manager)
+
+        # Flush Redis to ensure test isolation
+        await self.storage.get_client().flushdb()
 
         # Attach lifespan-like state
         from agentscope.app._manager import (
